@@ -1,0 +1,16 @@
+﻿fastapi
+uvicorn[standard]
+opencv-python-headless
+numpy<2
+pandas
+matplotlib
+scikit-learn
+pyyaml
+psycopg2-binary
+tqdm
+pillow
+albumentations
+ultralytics
+thop
+requests
+python-dotenv

@@ -1,0 +1,25 @@
+# configs/train.yaml
+model:
+  backbone: "dual_path_cnn"  # your custom backbone
+  neck: "bifpn"
+  heads: "dual_heads"
+  
+dataset:
+  train: "data/images/train"
+  val: "data/images/val"
+  nc: 2  # fire, smoke
+  names: ['fire', 'smoke']
+  img_size: 640
+  
+training:
+  epochs: 100
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0005
+  patience: 20  # early stopping
+  
+loss:
+  box: "ciou"
+  cls: "focal"
+  
+device: "cuda"  # or "cpu"
