@@ -8,6 +8,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5610343610")
 TELEGRAM_COOLDOWN_SECONDS = int(os.getenv("TELEGRAM_COOLDOWN_SECONDS", "15"))
 
 DB_ENABLED = os.getenv("DB_ENABLED", "true").lower() == "true"
+CAM_ID = 0  # or whatever default you want
 
 FRONTEND_ORIGINS = [
     origin.strip()
