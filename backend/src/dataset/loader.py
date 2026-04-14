@@ -40,7 +40,9 @@ class FireDataset(Dataset):
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) == 5:
-                        boxes.append(list(map(float, parts)))
+                        cls_id = int(float(parts[0]))
+                        x, y, w, h = map(float, parts[1:])
+                        boxes.append([x, y, w, h, cls_id])  # xywh + class
         except:
             pass
         return boxes
@@ -53,24 +55,25 @@ class FireDataset(Dataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = image.shape[:2]
         
-        # Load labels and convert to absolute coords
-        boxes = self._load_yolo_label(label_path)
-        boxes_abs = []
-        for cls, x, y, w, h in boxes:
-            x1 = (x - w/2) * orig_w
-            y1 = (y - h/2) * orig_h
-            x2 = (x + w/2) * orig_w  
-            y2 = (y + h/2) * orig_h
-            boxes_abs.append([x1, y1, x2, y2, cls])
+        # Load YOLO labels (normalized xywh + class)
+        raw_boxes = self._load_yolo_label(label_path)
         
-        # Resize image
+        # Resize image to target size
         image_resized = cv2.resize(image, (self.img_size, self.img_size))
         image_tensor = torch.from_numpy(image_resized).permute(2,0,1).float() / 255.0
         
-        # Convert boxes to tensor (or dummy if empty)
-        if boxes_abs:
-            target = torch.tensor(boxes_abs, dtype=torch.float32)
+        # Create target dict for model
+        if raw_boxes:
+            boxes = torch.tensor(raw_boxes, dtype=torch.float32)  # [N, 5] xywh+class (normalized)
+            target = {
+                "boxes": boxes[:, :4],    # [N, 4] x,y,w,h
+                "labels": boxes[:, 4].long()  # [N] class ids
+            }
         else:
-            target = torch.zeros((1, 5))
-            
+            # Empty target
+            target = {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "labels": torch.zeros((0,), dtype=torch.long)
+            }
+        
         return image_tensor, target

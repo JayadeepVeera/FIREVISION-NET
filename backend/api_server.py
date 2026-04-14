@@ -1,4 +1,5 @@
 import base64
+import binascii
 import time
 from typing import Dict
 
@@ -8,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from configs.settings import (
+from backend.configs.settings import (
     SQLITE_DB_PATH,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
@@ -17,9 +18,9 @@ from configs.settings import (
     DB_ENABLED,
     FRONTEND_ORIGINS,
 )
-from src.alerts.telegram_alert import TelegramAlert
-from src.database.logger import EventLogger
-from src.inference.live_cam import FireVisionNet
+from backend.src.alerts.telegram_alert import TelegramAlert
+from backend.src.database.logger import EventLogger
+from backend.src.inference.live_cam import FireVisionNet
 
 app = FastAPI(title="FireVisionNet API")
 
@@ -48,6 +49,37 @@ last_alert_state = {
 
 class FramePayload(BaseModel):
     image: str
+
+
+def decode_base64_to_frame(image_str: str):
+    if not image_str or not isinstance(image_str, str):
+        raise ValueError("Empty image payload")
+
+    raw = image_str.strip()
+
+    if "," in raw:
+        raw = raw.split(",", 1)[1]
+
+    raw = "".join(raw.split())
+    raw += "=" * (-len(raw) % 4)
+
+    try:
+        img_bytes = base64.b64decode(raw)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"Base64 decode failed: {str(e)}")
+
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if frame is None:
+        raise ValueError("Decoded bytes are not a valid image")
+
+    return frame
+
+
+@app.get("/")
+def root():
+    return {"ok": True, "message": "FireVisionNet API running"}
 
 
 @app.get("/health")
@@ -79,27 +111,24 @@ def test_telegram():
 @app.post("/detect-frame")
 def detect_frame(payload: FramePayload) -> Dict:
     try:
-        raw = payload.image.split(",")[-1]
-        img_bytes = base64.b64decode(raw)
-        np_arr = np.frombuffer(img_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-        if frame is None:
-            return {"ok": False, "error": "Invalid image"}
-
+        frame = decode_base64_to_frame(payload.image)
         out, status = detector.process(frame)
         processed_image = detector.encode_frame_to_base64(out)
 
         now = time.time()
         dangerous_statuses = {"REAL FIRE", "FAKE FIRE", "REAL SMOKE", "FAKE SMOKE"}
 
+        alert_sent = False
+        event_logged = False
+
         if status in dangerous_statuses:
             logger.log_event(
                 status=status,
                 fps=None,
                 source="web_camera",
-                extra_text=f"Detected: {status}"
+                extra_text=f"Detected: {status}",
             )
+            event_logged = True
 
             should_send_alert = (
                 last_alert_state["status"] != status
@@ -116,11 +145,14 @@ def detect_frame(payload: FramePayload) -> Dict:
                 telegram.send_message(alert_text)
                 last_alert_state["status"] = status
                 last_alert_state["ts"] = now
+                alert_sent = True
 
         return {
             "ok": True,
             "status": status,
             "processed_image": processed_image,
+            "event_logged": event_logged,
+            "alert_sent": alert_sent,
         }
 
     except Exception as e:
