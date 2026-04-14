@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 import os
 import time
 import traceback
@@ -21,9 +22,14 @@ from configs.settings import (
     DB_ENABLED,
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("firevision.api")
+
 app = FastAPI(title="FireVisionNet API")
 
-# Use explicit origins for browser access
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://firevision-net-1.onrender.com",
@@ -37,10 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-last_alert_state = {
-    "status": None,
-    "ts": 0.0,
-}
+last_alert_state = {"status": None, "ts": 0.0}
 
 
 class FramePayload(BaseModel):
@@ -52,7 +55,6 @@ def decode_base64_to_frame(image_str: str):
         raise ValueError("Empty image payload")
 
     raw = image_str.strip()
-
     if "," in raw:
         raw = raw.split(",", 1)[1]
 
@@ -76,9 +78,12 @@ def decode_base64_to_frame(image_str: str):
 @lru_cache(maxsize=1)
 def get_detector():
     try:
-        from src.inference.live_cam import FireVisionNet
-        return FireVisionNet()
+        from src.inference.firevision_net import FireVisionNet
+        detector = FireVisionNet()
+        logger.info("Detector initialized successfully")
+        return detector
     except Exception as e:
+        logger.exception("Detector init failed")
         raise RuntimeError(f"Detector init failed: {type(e).__name__}: {str(e)}")
 
 
@@ -86,8 +91,14 @@ def get_detector():
 def get_logger():
     try:
         from src.database.logger import EventLogger
-        return EventLogger(db_path=SQLITE_DB_PATH, enabled=DB_ENABLED)
+        db_dir = os.path.dirname(SQLITE_DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        event_logger = EventLogger(db_path=SQLITE_DB_PATH, enabled=DB_ENABLED)
+        logger.info(f"Logger initialized successfully with db_path={SQLITE_DB_PATH}")
+        return event_logger
     except Exception as e:
+        logger.exception("Logger init failed")
         raise RuntimeError(f"Logger init failed: {type(e).__name__}: {str(e)}")
 
 
@@ -95,14 +106,26 @@ def get_logger():
 def get_telegram():
     try:
         from src.alerts.telegram_alert import TelegramAlert
-        return TelegramAlert(
+        telegram = TelegramAlert(
             bot_token=TELEGRAM_BOT_TOKEN,
             chat_id=TELEGRAM_CHAT_ID,
             cooldown=TELEGRAM_COOLDOWN_SECONDS,
             enabled=TELEGRAM_ENABLED,
         )
+        logger.info("Telegram initialized successfully")
+        return telegram
     except Exception as e:
+        logger.exception("Telegram init failed")
         raise RuntimeError(f"Telegram init failed: {type(e).__name__}: {str(e)}")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    logger.info(f"{request.method} {request.url.path} -> {response.status_code} in {duration:.3f}s")
+    return response
 
 
 @app.get("/")
@@ -148,6 +171,7 @@ def health():
             "allowed_origins": ALLOWED_ORIGINS,
             "allow_credentials": False,
         },
+        "db_path": SQLITE_DB_PATH,
     }
 
 
@@ -163,19 +187,22 @@ def cors_debug(request: Request):
 @app.get("/events")
 def get_events():
     try:
-        logger = get_logger()
-        return {"events": logger.get_recent_events(limit=50)}
+        event_logger = get_logger()
+        events = event_logger.get_recent_events(limit=50)
+        return {"events": events}
     except Exception as e:
+        logger.exception("Failed to fetch events")
         raise HTTPException(status_code=500, detail=f"Failed to fetch events: {str(e)}")
 
 
 @app.delete("/events")
 def clear_events():
     try:
-        logger = get_logger()
-        logger.clear_events()
+        event_logger = get_logger()
+        event_logger.clear_events()
         return {"ok": True, "message": "All events cleared"}
     except Exception as e:
+        logger.exception("Failed to clear events")
         raise HTTPException(status_code=500, detail=f"Failed to clear events: {str(e)}")
 
 
@@ -190,6 +217,7 @@ def test_telegram():
             "info": info,
         }
     except Exception as e:
+        logger.exception("Telegram error")
         raise HTTPException(status_code=500, detail=f"Telegram error: {str(e)}")
 
 
@@ -197,11 +225,11 @@ def test_telegram():
 def detect_frame(payload: FramePayload) -> Dict:
     try:
         detector = get_detector()
-        logger = get_logger()
+        event_logger = get_logger()
         telegram = get_telegram()
 
         frame = decode_base64_to_frame(payload.image)
-        out, status = detector.process(frame)
+        out, status, score = detector.process(frame)
         processed_image = detector.encode_frame_to_base64(out)
 
         now = time.time()
@@ -210,15 +238,15 @@ def detect_frame(payload: FramePayload) -> Dict:
         alert_sent = False
         event_logged = False
 
-        if status in dangerous_statuses:
-            logger.log_event(
-                status=status,
-                fps=None,
-                source="web_camera",
-                extra_text=f"Detected: {status}",
-            )
-            event_logged = True
+        event_logger.log_event(
+            status=status,
+            fps=None,
+            source="web_camera",
+            extra_text=f"Detected: {status}, score={score:.4f}",
+        )
+        event_logged = True
 
+        if status in dangerous_statuses:
             should_send_alert = (
                 last_alert_state["status"] != status
                 or (now - last_alert_state["ts"] > TELEGRAM_COOLDOWN_SECONDS)
@@ -228,17 +256,20 @@ def detect_frame(payload: FramePayload) -> Dict:
                 alert_text = (
                     f"🚨 FireVisionNet Alert\n\n"
                     f"Status: {status}\n"
+                    f"Score: {score:.4f}\n"
                     f"Source: Live Camera\n"
                     f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-                telegram.send_message(alert_text)
-                last_alert_state["status"] = status
-                last_alert_state["ts"] = now
-                alert_sent = True
+                ok, info = telegram.send_message(alert_text)
+                if ok:
+                    last_alert_state["status"] = status
+                    last_alert_state["ts"] = now
+                    alert_sent = True
 
         return {
             "ok": True,
             "status": status,
+            "score": score,
             "processed_image": processed_image,
             "event_logged": event_logged,
             "alert_sent": alert_sent,
@@ -247,6 +278,7 @@ def detect_frame(payload: FramePayload) -> Dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception("detect-frame failed")
         raise HTTPException(
             status_code=500,
             detail={
