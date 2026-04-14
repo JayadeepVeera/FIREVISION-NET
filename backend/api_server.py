@@ -24,12 +24,28 @@ from src.alerts.telegram_alert import TelegramAlert
 from src.database.logger import EventLogger
 from src.inference.live_cam import FireVisionNet
 
+
+def normalize_origins(origins):
+    if not origins:
+        return ["*"], False
+
+    if isinstance(origins, str):
+        origins = [o.strip() for o in origins.split(",") if o.strip()]
+
+    if origins == ["*"]:
+        return ["*"], False
+
+    return origins, True
+
+
+allowed_origins, allow_credentials = normalize_origins(FRONTEND_ORIGINS)
+
 app = FastAPI(title="FireVisionNet API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -97,17 +113,37 @@ def root():
 
 @app.get("/health")
 def health():
+    checks = {
+        "detector": {"ok": False, "error": None},
+        "logger": {"ok": False, "error": None},
+        "telegram": {"ok": False, "error": None},
+    }
+
     try:
         get_detector()
-        get_logger()
-        get_telegram()
-        return {"ok": True, "message": "FireVisionNet API healthy"}
+        checks["detector"]["ok"] = True
     except Exception as e:
-        return {
-            "ok": False,
-            "error": f"{type(e).__name__}: {str(e)}",
-            "trace": traceback.format_exc(),
-        }
+        checks["detector"]["error"] = f"{type(e).__name__}: {str(e)}"
+
+    try:
+        get_logger()
+        checks["logger"]["ok"] = True
+    except Exception as e:
+        checks["logger"]["error"] = f"{type(e).__name__}: {str(e)}"
+
+    try:
+        get_telegram()
+        checks["telegram"]["ok"] = True
+    except Exception as e:
+        checks["telegram"]["error"] = f"{type(e).__name__}: {str(e)}"
+
+    all_ok = all(v["ok"] for v in checks.values())
+
+    return {
+        "ok": all_ok,
+        "message": "FireVisionNet API healthy" if all_ok else "FireVisionNet API partially unhealthy",
+        "checks": checks,
+    }
 
 
 @app.get("/events")
@@ -197,4 +233,10 @@ def detect_frame(payload: FramePayload) -> Dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"{type(e).__name__}: {str(e)}",
+                "trace": traceback.format_exc(),
+            },
+        )
