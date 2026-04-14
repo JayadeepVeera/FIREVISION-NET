@@ -8,7 +8,7 @@ from typing import Dict
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -19,32 +19,21 @@ from configs.settings import (
     TELEGRAM_ENABLED,
     TELEGRAM_COOLDOWN_SECONDS,
     DB_ENABLED,
-    FRONTEND_ORIGINS,
 )
 
 app = FastAPI(title="FireVisionNet API")
 
-
-def normalize_origins(origins):
-    if not origins:
-        return ["*"], False
-
-    if isinstance(origins, str):
-        origins = [o.strip() for o in origins.split(",") if o.strip()]
-
-    if origins == ["*"]:
-        return ["*"], False
-
-    return origins, True
-
-
-allowed_origins, allow_credentials = normalize_origins(FRONTEND_ORIGINS)
+# Use explicit origins for browser access
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://firevision-net-1.onrender.com",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=allow_credentials,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -155,6 +144,19 @@ def health():
         "ok": True,
         "message": "API reachable",
         "checks": checks,
+        "cors": {
+            "allowed_origins": ALLOWED_ORIGINS,
+            "allow_credentials": False,
+        },
+    }
+
+
+@app.get("/cors-debug")
+def cors_debug(request: Request):
+    return {
+        "ok": True,
+        "origin_received": request.headers.get("origin"),
+        "allowed_origins": ALLOWED_ORIGINS,
     }
 
 
