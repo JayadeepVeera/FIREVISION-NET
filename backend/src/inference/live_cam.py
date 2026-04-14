@@ -16,7 +16,7 @@ try:
 except ImportError:
     winsound = None
 
-from backend.configs.settings import (
+from configs.settings import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     TELEGRAM_COOLDOWN_SECONDS,
