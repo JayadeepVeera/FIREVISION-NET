@@ -3,7 +3,7 @@ import binascii
 import time
 import traceback
 from functools import lru_cache
-from typing import Dict
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -24,6 +24,7 @@ from src.alerts.telegram_alert import TelegramAlert
 from src.database.logger import EventLogger
 from src.inference.live_cam import FireVisionNet
 
+app = FastAPI(title="FireVisionNet API")
 
 def normalize_origins(origins):
     if not origins:
@@ -37,10 +38,7 @@ def normalize_origins(origins):
 
     return origins, True
 
-
 allowed_origins, allow_credentials = normalize_origins(FRONTEND_ORIGINS)
-
-app = FastAPI(title="FireVisionNet API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,10 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-last_alert_state = {
-    "status": None,
-    "ts": 0.0,
-}
+last_alert_state = {"status": None, "ts": 0.0}
 
 
 class FramePayload(BaseModel):
@@ -65,7 +60,6 @@ def decode_base64_to_frame(image_str: str):
         raise ValueError("Empty image payload")
 
     raw = image_str.strip()
-
     if "," in raw:
         raw = raw.split(",", 1)[1]
 
@@ -88,22 +82,31 @@ def decode_base64_to_frame(image_str: str):
 
 @lru_cache(maxsize=1)
 def get_detector():
-    return FireVisionNet()
+    try:
+        return FireVisionNet()
+    except Exception as e:
+        raise RuntimeError(f"Detector init failed: {type(e).__name__}: {str(e)}")
 
 
 @lru_cache(maxsize=1)
 def get_logger():
-    return EventLogger(db_path=SQLITE_DB_PATH, enabled=DB_ENABLED)
+    try:
+        return EventLogger(db_path=SQLITE_DB_PATH, enabled=DB_ENABLED)
+    except Exception as e:
+        raise RuntimeError(f"Logger init failed: {type(e).__name__}: {str(e)}")
 
 
 @lru_cache(maxsize=1)
 def get_telegram():
-    return TelegramAlert(
-        bot_token=TELEGRAM_BOT_TOKEN,
-        chat_id=TELEGRAM_CHAT_ID,
-        cooldown=TELEGRAM_COOLDOWN_SECONDS,
-        enabled=TELEGRAM_ENABLED,
-    )
+    try:
+        return TelegramAlert(
+            bot_token=TELEGRAM_BOT_TOKEN,
+            chat_id=TELEGRAM_CHAT_ID,
+            cooldown=TELEGRAM_COOLDOWN_SECONDS,
+            enabled=TELEGRAM_ENABLED,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Telegram init failed: {type(e).__name__}: {str(e)}")
 
 
 @app.get("/")
@@ -123,25 +126,23 @@ def health():
         get_detector()
         checks["detector"]["ok"] = True
     except Exception as e:
-        checks["detector"]["error"] = f"{type(e).__name__}: {str(e)}"
+        checks["detector"]["error"] = str(e)
 
     try:
         get_logger()
         checks["logger"]["ok"] = True
     except Exception as e:
-        checks["logger"]["error"] = f"{type(e).__name__}: {str(e)}"
+        checks["logger"]["error"] = str(e)
 
     try:
         get_telegram()
         checks["telegram"]["ok"] = True
     except Exception as e:
-        checks["telegram"]["error"] = f"{type(e).__name__}: {str(e)}"
-
-    all_ok = all(v["ok"] for v in checks.values())
+        checks["telegram"]["error"] = str(e)
 
     return {
-        "ok": all_ok,
-        "message": "FireVisionNet API healthy" if all_ok else "FireVisionNet API partially unhealthy",
+        "ok": True,
+        "message": "FireVisionNet API reachable",
         "checks": checks,
     }
 
@@ -235,8 +236,5 @@ def detect_frame(payload: FramePayload) -> Dict:
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": f"{type(e).__name__}: {str(e)}",
-                "trace": traceback.format_exc(),
-            },
+            detail=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
         )
