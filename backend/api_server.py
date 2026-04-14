@@ -11,22 +11,33 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from configs.settings import (
+    SQLITE_DB_PATH,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    TELEGRAM_ENABLED,
+    TELEGRAM_COOLDOWN_SECONDS,
+    DB_ENABLED,
+    FRONTEND_ORIGINS,
+)
+from src.alerts.telegram_alert import TelegramAlert
+from src.database.logger import EventLogger
+from src.inference.live_cam import FireVisionNet
+
 app = FastAPI(title="FireVisionNet API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=FRONTEND_ORIGINS if FRONTEND_ORIGINS else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-startup_state = {
-    "ok": True,
-    "error": None,
+last_alert_state = {
+    "status": None,
+    "ts": 0.0,
 }
-
-last_alert_state = {"status": None, "ts": 0.0}
 
 
 class FramePayload(BaseModel):
@@ -38,6 +49,7 @@ def decode_base64_to_frame(image_str: str):
         raise ValueError("Empty image payload")
 
     raw = image_str.strip()
+
     if "," in raw:
         raw = raw.split(",", 1)[1]
 
@@ -51,33 +63,25 @@ def decode_base64_to_frame(image_str: str):
 
     np_arr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
     if frame is None:
         raise ValueError("Decoded bytes are not a valid image")
+
     return frame
 
 
 @lru_cache(maxsize=1)
 def get_detector():
-    from backend.src.inference.live_cam import FireVisionNet
     return FireVisionNet()
 
 
 @lru_cache(maxsize=1)
 def get_logger():
-    from backend.configs.settings import SQLITE_DB_PATH, DB_ENABLED
-    from backend.src.database.logger import EventLogger
     return EventLogger(db_path=SQLITE_DB_PATH, enabled=DB_ENABLED)
 
 
 @lru_cache(maxsize=1)
 def get_telegram():
-    from backend.configs.settings import (
-        TELEGRAM_BOT_TOKEN,
-        TELEGRAM_CHAT_ID,
-        TELEGRAM_ENABLED,
-        TELEGRAM_COOLDOWN_SECONDS,
-    )
-    from backend.src.alerts.telegram_alert import TelegramAlert
     return TelegramAlert(
         bot_token=TELEGRAM_BOT_TOKEN,
         chat_id=TELEGRAM_CHAT_ID,
@@ -97,13 +101,46 @@ def health():
         get_detector()
         get_logger()
         get_telegram()
-        return {"ok": True, "message": "FireVisionNet API running"}
+        return {"ok": True, "message": "FireVisionNet API healthy"}
     except Exception as e:
         return {
             "ok": False,
             "error": f"{type(e).__name__}: {str(e)}",
             "trace": traceback.format_exc(),
         }
+
+
+@app.get("/events")
+def get_events():
+    try:
+        logger = get_logger()
+        return {"events": logger.get_recent_events(limit=50)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch events: {str(e)}")
+
+
+@app.delete("/events")
+def clear_events():
+    try:
+        logger = get_logger()
+        logger.clear_events()
+        return {"ok": True, "message": "All events cleared"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear events: {str(e)}")
+
+
+@app.post("/test-telegram")
+def test_telegram():
+    try:
+        telegram = get_telegram()
+        ok, info = telegram.send_message("✨ FireVisionNet test message is working.")
+        return {
+            "ok": ok,
+            "message": "Telegram test sent successfully." if ok else "Telegram test failed.",
+            "info": info,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Telegram error: {str(e)}")
 
 
 @app.post("/detect-frame")
@@ -134,13 +171,17 @@ def detect_frame(payload: FramePayload) -> Dict:
 
             should_send_alert = (
                 last_alert_state["status"] != status
-                or (now - last_alert_state["ts"] > 30)
+                or (now - last_alert_state["ts"] > TELEGRAM_COOLDOWN_SECONDS)
             )
 
             if should_send_alert:
-                telegram.send_message(
-                    f"🚨 FireVisionNet Alert\n\nStatus: {status}\nSource: Live Camera\nTime: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                alert_text = (
+                    f"🚨 FireVisionNet Alert\n\n"
+                    f"Status: {status}\n"
+                    f"Source: Live Camera\n"
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
+                telegram.send_message(alert_text)
                 last_alert_state["status"] = status
                 last_alert_state["ts"] = now
                 alert_sent = True
